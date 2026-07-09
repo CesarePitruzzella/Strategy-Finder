@@ -1,6 +1,5 @@
 import Papa, { type ParseResult } from 'papaparse'
-import readXlsxFile from 'read-excel-file/web-worker'
-import type { DriverProfile, RaceModel, StintMode, StintOption } from './types'
+import type { DriverProfile, RaceModel, PitRules, StintMode, StintOption } from './types'
 
 interface Row {
   [key: string]: string | number | null | undefined
@@ -69,117 +68,6 @@ const toNumber = (value: string | number | null | undefined, fallback = 0): numb
   return fallback
 }
 
-const toMode = (value: string | number | null | undefined): StintMode => {
-  const mode = String(value ?? '').trim().toLowerCase()
-  if (mode.includes('lico')) {
-    return 'LiCo +1'
-  }
-  if (mode.includes('used')) {
-    return 'Used Tyre'
-  }
-  return 'Push'
-}
-
-const normalizeRows = (rows: unknown[][]): Row[] => {
-  if (rows.length < 2) {
-    return []
-  }
-
-  const header = rows[0].map((cell) => String(cell ?? '').trim())
-
-  return rows
-    .slice(1)
-    .filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''))
-    .map((row) => {
-      const mapped: Row = {}
-      header.forEach((field, index) => {
-        if (field) {
-          mapped[field] = (row[index] as string | number | null | undefined) ?? undefined
-        }
-      })
-      return mapped
-    })
-}
-
-const parseDriverProfiles = (rows: Row[]): DriverProfile[] =>
-  rows
-    .map((row) => {
-      const code = String(getValue(row, ['driver', 'driver code', 'code']) ?? '')
-        .trim()
-        .toUpperCase()
-
-      return {
-        code,
-        pushPaceSec: parseDurationToSec(
-          getValue(row, ['push pace', 'pushpace', 'push_pace', 'push'])
-        ),
-        licoPaceSec: parseDurationToSec(
-          getValue(row, ['lico pace', 'lico+1 pace', 'licopace', 'lico'])
-        ),
-      }
-    })
-    .filter((driver) => driver.code && driver.pushPaceSec > 0 && driver.licoPaceSec > 0)
-
-const parseStints = (rows: Row[]): StintOption[] =>
-  rows
-    .map((row, index) => {
-      const driverCode = String(getValue(row, ['driver', 'driver code', 'code']) ?? '')
-        .trim()
-        .toUpperCase()
-      const mode = toMode(getValue(row, ['mode', 'stint mode', 'profile']))
-      const durationSec = parseDurationToSec(
-        getValue(row, ['duration', 'stint duration', 'time', 'duration sec'])
-      )
-
-      return {
-        id: `${driverCode}-${mode}-${index}`,
-        driverCode,
-        mode,
-        durationSec,
-        laps: toNumber(getValue(row, ['laps', 'lap count']), 0),
-        tyresUsed: toNumber(getValue(row, ['tyres used', 'tires used', 'tyres', 'tires']), 0),
-        fuelLiters: toNumber(getValue(row, ['fuel liters', 'fuel', 'fuel l']), 0),
-      }
-    })
-    .filter((stint) => stint.driverCode && stint.durationSec > 0 && stint.laps > 0)
-
-const parseInit = (rows: Row[]) => {
-  const keyedValues = new Map<string, number>()
-
-  rows.forEach((row) => {
-    const rawKey = getValue(row, ['key', 'name', 'setting'])
-    const rawValue = getValue(row, ['value', 'val'])
-    const key = String(rawKey ?? '').trim()
-    if (!key) {
-      return
-    }
-
-    const parsedValue = parseDurationToSec(rawValue)
-    keyedValues.set(normalizeKey(key), parsedValue || toNumber(rawValue, 0))
-  })
-
-  return {
-    pitlaneBaselineSec:
-      keyedValues.get('pitlanebaseline') ?? keyedValues.get('pitlanebaselineloss') ?? 85,
-    fullServiceSec: keyedValues.get('fullservice') ?? 56,
-    fuelOnlySec: keyedValues.get('fuelonly') ?? 43,
-    tyreOnlySec: keyedValues.get('tyreonly') ?? keyedValues.get('tireonly') ?? 13,
-    initialTyres:
-      keyedValues.get('racetyres') ?? keyedValues.get('initialtyres') ?? keyedValues.get('tyrepool') ?? 36,
-    raceDurationSec:
-      keyedValues.get('racedurationsec') ??
-      keyedValues.get('raceduration') ??
-      keyedValues.get('racetimelimit') ??
-      DEFAULT_RACE_DURATION_SEC,
-    finalLapAllowanceSec:
-      keyedValues.get('finallapallowancesec') ??
-      keyedValues.get('finallapallowance') ??
-      DEFAULT_FINAL_LAP_ALLOWANCE_SEC,
-    maxConsecutiveStintsPerDriver:
-      keyedValues.get('maxconsecutivestints') ?? DEFAULT_MAX_CONSECUTIVE_STINTS,
-  }
-}
-
 const parseCsv = async (file: File): Promise<Row[]> => {
   const text = await file.text()
   return new Promise<Row[]>((resolve, reject) => {
@@ -198,82 +86,141 @@ const parseCsv = async (file: File): Promise<Row[]> => {
   })
 }
 
-const readWorkbookRows = async (file: File) => {
-  const sheets = await readXlsxFile(file)
-  const bySheet = new Map<string, Row[]>()
+const normalizeHeaders = (rows: Row[]): string[] =>
+  rows.length > 0 ? Object.keys(rows[0]).map((header) => normalizeKey(header)) : []
 
-  for (const sheet of sheets) {
-    bySheet.set(normalizeKey(sheet.sheet), normalizeRows(sheet.data))
+const requireHeaders = (rows: Row[], requiredHeaders: string[], fileLabel: string): void => {
+  const headers = new Set(normalizeHeaders(rows))
+  const missing = requiredHeaders.filter((header) => !headers.has(normalizeKey(header)))
+  if (missing.length > 0) {
+    throw new Error(`${fileLabel} is missing required columns: ${missing.join(', ')}`)
   }
-
-  return bySheet
 }
 
-const resolveModelFromRows = ({
-  driverRows,
-  stintRows,
-  initRows,
-}: {
-  driverRows: Row[]
-  stintRows: Row[]
-  initRows: Row[]
-}): RaceModel => {
+const parseDriverProfiles = (rows: Row[]): DriverProfile[] =>
+  rows
+    .map((row) => {
+      const code = String(getValue(row, ['driver', 'driver code', 'code']) ?? '')
+        .trim()
+        .toUpperCase()
+
+      return {
+        code,
+        pushPaceSec: parseDurationToSec(getValue(row, ['push pace', 'pushpace', 'push_pace', 'push'])),
+        licoPaceSec: parseDurationToSec(getValue(row, ['lico pace', 'lico+1 pace', 'licopace', 'lico'])),
+        pushFuelUsageLiters: toNumber(
+          getValue(row, ['push fuel usage', 'push fuel', 'pushfuelusage']),
+          0
+        ),
+        licoFuelUsageLiters: toNumber(
+          getValue(row, ['lico fuel usage', 'lico fuel', 'licofuelusage']),
+          0
+        ),
+      }
+    })
+    .filter((driver) =>
+      driver.code &&
+      driver.pushPaceSec > 0 &&
+      driver.licoPaceSec > 0 &&
+      driver.pushFuelUsageLiters >= 0 &&
+      driver.licoFuelUsageLiters >= 0
+    )
+
+const parseRaceConfig = (rows: Row[]): { raceDurationSec: number; pitRules: PitRules } => {
+  const firstRow = rows[0]
+  if (!firstRow) {
+    return {
+      raceDurationSec: DEFAULT_RACE_DURATION_SEC,
+      pitRules: {
+        pitlaneBaselineSec: 20,
+        refuelTimeSecPerLiter: 0,
+        tyreChangeTimeSec: 12,
+        initialTyres: 60,
+      },
+    }
+  }
+
+  return {
+    raceDurationSec: Math.max(
+      parseDurationToSec(getValue(firstRow, ['race duration', 'duration'])),
+      1
+    ),
+    pitRules: {
+      pitlaneBaselineSec: Math.max(toNumber(getValue(firstRow, ['pitlane time']), 20), 0),
+      refuelTimeSecPerLiter: Math.max(toNumber(getValue(firstRow, ['refuel time']), 0), 0),
+      tyreChangeTimeSec: Math.max(toNumber(getValue(firstRow, ['tyre change time']), 12), 0),
+      initialTyres: Math.max(toNumber(getValue(firstRow, ['total new tyres', 'tyres']), 60), 0),
+    },
+  }
+}
+
+const buildStintMatrix = (drivers: DriverProfile[]): StintOption[] => {
+  return drivers.flatMap((driver, driverIndex) => {
+    const usedTyreFuel = driver.pushFuelUsageLiters
+    const stintOptions: Array<{ mode: StintMode; paceSec: number; fuelLiters: number; doubleStinted: boolean }> = [
+      { mode: 'Push', paceSec: driver.pushPaceSec, fuelLiters: driver.pushFuelUsageLiters, doubleStinted: false },
+      { mode: 'LiCo +1', paceSec: driver.licoPaceSec, fuelLiters: driver.licoFuelUsageLiters, doubleStinted: false },
+      { mode: 'Used Tyre', paceSec: driver.pushPaceSec * 1.015, fuelLiters: usedTyreFuel, doubleStinted: true },
+    ]
+
+    return stintOptions.map((stint, stintIndex) => {
+      return {
+        id: `${driver.code}-${stint.mode}-${driverIndex}-${stintIndex}`,
+        driverCode: driver.code,
+        mode: stint.mode,
+        durationSec: stint.paceSec,
+        laps: 1,
+        tyresUsed: stint.doubleStinted ? 0 : 1,
+        fuelLiters: stint.fuelLiters,
+      }
+    })
+  })
+}
+
+const resolveModelFromRows = (driverRows: Row[], raceRows: Row[]): RaceModel => {
+  requireHeaders(
+    driverRows,
+    ['driver', 'push pace', 'lico pace', 'push fuel usage', 'lico fuel usage'],
+    'Driver CSV'
+  )
+  requireHeaders(
+    raceRows,
+    ['total new tyres', 'race duration', 'pitlane time', 'refuel time', 'tyre change time'],
+    'Race CSV'
+  )
+
   const driverProfiles = parseDriverProfiles(driverRows)
-  const stintMatrix = parseStints(stintRows)
-  const init = parseInit(initRows)
+  const { raceDurationSec, pitRules } = parseRaceConfig(raceRows)
+  const stintMatrix = buildStintMatrix(driverProfiles)
 
   if (driverProfiles.length === 0) {
     throw new Error('No valid driver profiles found.')
   }
 
   if (stintMatrix.length === 0) {
-    throw new Error('No valid stint matrix rows found.')
-  }
-
-  const knownDrivers = new Set(driverProfiles.map((driver) => driver.code))
-  const invalidStints = stintMatrix.filter((stint) => !knownDrivers.has(stint.driverCode))
-  if (invalidStints.length > 0) {
-    throw new Error(`Unknown driver codes in stint matrix: ${invalidStints.map((row) => row.driverCode).join(', ')}`)
+    throw new Error('No valid stint options could be generated from the driver list.')
   }
 
   return {
-    raceDurationSec: Math.max(init.raceDurationSec, 1),
-    finalLapAllowanceSec: Math.max(init.finalLapAllowanceSec, 0),
-    maxConsecutiveStintsPerDriver: Math.max(Math.floor(init.maxConsecutiveStintsPerDriver), 1),
+    raceDurationSec,
+    finalLapAllowanceSec: DEFAULT_FINAL_LAP_ALLOWANCE_SEC,
+    maxConsecutiveStintsPerDriver: DEFAULT_MAX_CONSECUTIVE_STINTS,
     driverProfiles,
     stintMatrix,
-    pitRules: {
-      pitlaneBaselineSec: Math.max(init.pitlaneBaselineSec, 0),
-      fullServiceSec: Math.max(init.fullServiceSec, 0),
-      fuelOnlySec: Math.max(init.fuelOnlySec, 0),
-      tyreOnlySec: Math.max(init.tyreOnlySec, 0),
-      initialTyres: Math.max(Math.floor(init.initialTyres), 0),
-    },
+    pitRules,
   }
 }
 
-export const ingestRaceConfiguration = async (file: File): Promise<RaceModel> => {
-  const lowerName = file.name.toLowerCase()
-
-  if (lowerName.endsWith('.csv')) {
-    const rows = await parseCsv(file)
-    return resolveModelFromRows({
-      driverRows: rows,
-      stintRows: rows,
-      initRows: [],
-    })
+export const ingestRaceConfiguration = async (
+  driverFile: File,
+  raceFile: File
+): Promise<RaceModel> => {
+  if (!driverFile.name.toLowerCase().endsWith('.csv') || !raceFile.name.toLowerCase().endsWith('.csv')) {
+    throw new Error('Both input files must be CSV files.')
   }
 
-  const bySheet = await readWorkbookRows(file)
-  const driverRows = bySheet.get('driverprofiles') ?? bySheet.get('drivers') ?? []
-  const stintRows = bySheet.get('stintmatrix') ?? bySheet.get('stints') ?? []
-  const initRows = bySheet.get('init') ?? []
-
-  return resolveModelFromRows({
-    driverRows,
-    stintRows,
-    initRows,
-  })
+  const [driverRows, raceRows] = await Promise.all([parseCsv(driverFile), parseCsv(raceFile)])
+  return resolveModelFromRows(driverRows, raceRows)
 }
 
 export const formatDuration = (seconds: number): string => {

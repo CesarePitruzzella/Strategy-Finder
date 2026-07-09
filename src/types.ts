@@ -4,6 +4,8 @@ export interface DriverProfile {
   code: string
   pushPaceSec: number
   licoPaceSec: number
+  pushFuelUsageLiters: number
+  licoFuelUsageLiters: number
 }
 
 export interface StintOption {
@@ -18,9 +20,8 @@ export interface StintOption {
 
 export interface PitRules {
   pitlaneBaselineSec: number
-  fullServiceSec: number
-  fuelOnlySec: number
-  tyreOnlySec: number
+  refuelTimeSecPerLiter: number
+  tyreChangeTimeSec: number
   initialTyres: number
 }
 
@@ -47,6 +48,7 @@ export interface StrategyBlock {
   pit: PitInstruction
   tyresRemaining: number
   fuelLiters: number
+  doubleStinted: boolean
 }
 
 export interface StrategyResult {

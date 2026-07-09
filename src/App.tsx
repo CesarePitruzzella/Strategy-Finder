@@ -19,19 +19,21 @@ const blockColor = (driverCode: string, map: Map<string, string>): string => {
 function App() {
   const [model, setModel] = useState<RaceModel | null>(null)
   const [strategies, setStrategies] = useState<StrategyResult[]>([])
-  const [selectedFile, setSelectedFile] = useState('')
+  const [driverFile, setDriverFile] = useState('')
+  const [raceFile, setRaceFile] = useState('')
+  const [driverInputFile, setDriverInputFile] = useState<File | null>(null)
+  const [raceInputFile, setRaceInputFile] = useState<File | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   const driverColorMap = useMemo(() => new Map<string, string>(), [])
 
-  const handleUpload = async (file: File) => {
+  const handleUpload = async (driver: File, race: File) => {
     setError('')
-    setSelectedFile(file.name)
     setStrategies([])
 
     try {
-      const parsedModel = await ingestRaceConfiguration(file)
+      const parsedModel = await ingestRaceConfiguration(driver, race)
       setModel(parsedModel)
     } catch (uploadError) {
       setModel(null)
@@ -65,30 +67,62 @@ function App() {
     <main className="app">
       <header>
         <h1>Strategy Finder</h1>
-        <p>Upload your race workbook (Excel or CSV), then compute top three race plans.</p>
+        <p>Upload the driver CSV and race CSV, then compute top three race plans.</p>
       </header>
 
       <section className="panel">
-        <label htmlFor="race-config">Configuration file</label>
+        <label htmlFor="driver-config">Driver CSV</label>
         <input
-          id="race-config"
+          id="driver-config"
           type="file"
-          accept=".xlsx,.xls,.csv"
+          accept=".csv"
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file) {
-              void handleUpload(file)
+              setDriverInputFile(file)
+              setDriverFile(file.name)
+              setModel(null)
+              setStrategies([])
             }
           }}
         />
 
-        {selectedFile && <p className="meta">Loaded: {selectedFile}</p>}
+        <label htmlFor="race-config">Race CSV</label>
+        <input
+          id="race-config"
+          type="file"
+          accept=".csv"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file) {
+              setRaceInputFile(file)
+              setRaceFile(file.name)
+              setModel(null)
+              setStrategies([])
+            }
+          }}
+        />
+
+        {driverFile && <p className="meta">Driver file: {driverFile}</p>}
+        {raceFile && <p className="meta">Race file: {raceFile}</p>}
         {model && (
           <p className="meta">
-            Drivers: {model.driverProfiles.length} · Stints: {model.stintMatrix.length} · Tyres:{' '}
+            Drivers: {model.driverProfiles.length} · Stint options: {model.stintMatrix.length} · Tyres:{' '}
             {model.pitRules.initialTyres}
           </p>
         )}
+
+        <button
+          type="button"
+          disabled={!driverInputFile || !raceInputFile || loading}
+          onClick={() => {
+            if (driverInputFile && raceInputFile) {
+              void handleUpload(driverInputFile, raceInputFile)
+            }
+          }}
+        >
+          {loading ? 'Optimizing…' : 'Load Race Model'}
+        </button>
 
         <button type="button" disabled={!model || loading} onClick={() => void handleOptimize()}>
           {loading ? 'Optimizing…' : 'Run Optimizer (Web Worker)'}
@@ -120,7 +154,9 @@ function App() {
                     title={`${block.driverCode} ${block.mode} · ${formatDuration(block.endSec - block.startSec)} · ${block.laps.toFixed(2)} laps`}
                   >
                     <span>{block.driverCode}</span>
-                    <small>{block.mode}</small>
+                    <small>
+                      {block.mode} · {block.doubleStinted ? 'Double-stinted tyres' : 'Fresh tyres'}
+                    </small>
                   </div>
                 ))}
               </div>
@@ -133,11 +169,11 @@ function App() {
                       Service: {block.pit.service} ({Math.round(block.pit.lossSec)}s) · Driver: {block.driverCode}
                     </p>
                     <p>
-                      Fuel: {block.fuelLiters}L · Mode: {block.mode} · Tyres Remaining: {block.tyresRemaining}
+                      Fuel: {block.fuelLiters.toFixed(2)}L · Mode: {block.mode} · Tyres:{' '}
+                      {block.doubleStinted ? 'Double-stinted' : 'Fresh'}
                     </p>
                     <p>
-                      Window: {formatDuration(block.startSec)} → {formatDuration(block.endSec)} · Laps +
-                      {block.laps.toFixed(2)}
+                      Window: {formatDuration(block.startSec)} → {formatDuration(block.endSec)} · Laps +{block.laps.toFixed(2)}
                     </p>
                   </div>
                 ))}
